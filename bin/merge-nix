@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+
+import http.client
+import os
+import subprocess
+import urllib
+
+class CFG:
+    pass
+
+
+CFG.channel_url = 'https://nixos.org/channels/nixpkgs-unstable'
+CFG.topic = 'local2'
+CFG.git_dir = '/home/maciek/maciek/github/nixpkgs/.git'
+
+
+def get_location_and_date(url):
+    res = urllib.parse.urlparse(url)
+    assert res.scheme == 'https'
+    c = http.client.HTTPSConnection(res.netloc)
+    c.request('GET', res.path)
+    resp = c.getresponse()
+    assert resp.getcode() == http.client.FOUND
+    return resp.headers.get('location'), resp.headers.get('date')
+
+
+def get_rev(url):
+    return url.split('.')[-1]
+
+
+def get_local_rev(git_dir, topic):
+    cmd = ['git', '--git-dir', git_dir, 'merge-base', topic, 'master']
+    r = subprocess.check_output(cmd)
+    return str(r.strip(), encoding='ascii')
+
+
+def make_cc(cfg):
+    def cc(*args):
+        work_tree = os.path.dirname(cfg.git_dir)
+        base_cmd = ['git', '--git-dir', cfg.git_dir, '--work-tree', work_tree]
+        cmd = base_cmd + list(args)
+        print("CMD: %r" % cmd)
+        return subprocess.check_call(cmd)
+    return cc
+
+
+def query_packages():
+    def ww(out_fname, cmd):
+        print("CMD: %r" % cmd)
+        out = subprocess.check_output(cmd)
+        home = os.path.expanduser("~")
+        out_path = os.path.join(home, out_fname)
+        print("  Retrieved %d bytes" % len(out))
+        print("  Saving to: %s", out_path)
+        with open(out_path, "wb") as f:
+            f.write(out)
+
+    ww("packages.txt", ["nix-env", "-qaP"])
+    ww("haskell-packages.txt", ["nix-env", "-qaPA", "nixpkgs.haskellPackages"])
+
+
+def main():
+    channel_location, channel_date = get_location_and_date(CFG.channel_url)
+    channel_rev = get_rev(channel_location)
+    local_rev = get_local_rev(CFG.git_dir, CFG.topic)
+    is_same_rev = local_rev.startswith(channel_rev)
+
+    print("Local:")
+    print("  repo:     %s" % CFG.git_dir)
+    print("  branch:   %s" % CFG.topic)
+    print("  rev:      %s" % local_rev)
+    print("Channel:")
+    print("  URL:      %s" % CFG.channel_url)
+    print("  location: %s" % channel_location)
+    print("  rev:      %s" % channel_rev)
+    print("  date:     %s" % channel_date)
+
+    if is_same_rev:
+        print("No need to update.")
+    else:
+        print("Need to rebase %s on %s." % (CFG.topic, channel_rev))
+        cc = make_cc(CFG)
+        cc('fetch', '--all')
+        cc('co', 'master')
+        cc('merge', 'upstream/master')
+        cc('rebase', channel_rev, CFG.topic)
+        print("Rebase done.")
+        print("Changes since last checkout:")
+        revset = "%s@{1}..%s" % (CFG.topic, CFG.topic)
+        cc('ll', revset)
+        query_packages()
+        print("All done.")
+
+
+if __name__ == "__main__":
+    main()
